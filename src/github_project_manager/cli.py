@@ -11,9 +11,13 @@ from urllib.parse import urlparse
 
 import requests
 import yaml
+from colorama import Fore, Style, init
+
+init(autoreset=True)
 
 API_BASE = "https://api.github.com"
 SUPPORTED_TARGET_STATES = {"present", "archived", "absent"}
+SUPPORTED_LIMITS = {"forked", "archived", "active", "private"}
 REQUEST_TIMEOUT = 30
 DEFAULT_TOKEN_FILE = ".github-token"
 
@@ -29,6 +33,7 @@ class RepoInventoryItem:
     target_state: str
     private: bool
     description: str
+    fork: bool
 
 
 class GitHubClient:
@@ -122,6 +127,7 @@ def repo_to_inventory_item(repo: dict[str, Any]) -> RepoInventoryItem:
         target_state=target_state,
         private=bool(repo.get("private", True)),
         description=repo.get("description") or "",
+        fork=bool(repo.get("fork", False)),
     )
 
 
@@ -149,10 +155,26 @@ def resolve_github_token(explicit_token: str | None = None) -> str:
     return str(os.getenv("GITHUB_TOKEN", "")).strip()
 
 
-def export_inventory(client: GitHubClient, output_path: str) -> None:
+def matches_limit(item: RepoInventoryItem, limit: str | None) -> bool:
+    """Return True if the item satisfies the given limit filter."""
+    if limit is None:
+        return True
+    if limit == "forked":
+        return item.fork
+    if limit == "archived":
+        return item.state == "archived"
+    if limit == "active":
+        return item.state == "active"
+    if limit == "private":
+        return item.private
+    return True
+
+
+def export_inventory(client: GitHubClient, output_path: str, limit: str | None = None) -> None:
     user = client.get_authenticated_user()
     repos = client.list_repositories()
-    items = sorted((repo_to_inventory_item(repo) for repo in repos), key=lambda item: item.url.lower())
+    all_items = sorted((repo_to_inventory_item(repo) for repo in repos), key=lambda item: item.url.lower())
+    items = [item for item in all_items if matches_limit(item, limit)]
 
     payload = {
         "llm_project": True,
@@ -161,7 +183,8 @@ def export_inventory(client: GitHubClient, output_path: str) -> None:
         "repositories": [asdict(item) for item in items],
     }
     save_inventory(output_path, payload)
-    print(f"Exported {len(items)} repositories to {output_path}")
+    suffix = f" (filter: {limit})" if limit else ""
+    print(f"Exported {len(items)} repositories to {output_path}{suffix}")
 
 
 def validate_target_state(url: str, target_state: str) -> str:
@@ -174,7 +197,7 @@ def validate_target_state(url: str, target_state: str) -> str:
     return normalized
 
 
-def apply_inventory(client: GitHubClient, input_path: str, dry_run: bool) -> None:
+def apply_inventory(client: GitHubClient, input_path: str, dry_run: bool, limit: str | None = None) -> None:
     inventory = load_inventory(input_path)
     repositories = inventory.get("repositories", [])
     if not isinstance(repositories, list):
@@ -182,6 +205,7 @@ def apply_inventory(client: GitHubClient, input_path: str, dry_run: bool) -> Non
 
     authed_owner = client.get_authenticated_user()["login"]
 
+    skipped = 0
     for entry in repositories:
         if not isinstance(entry, dict):
             raise ValueError("Each inventory entry must be an object")
@@ -190,44 +214,77 @@ def apply_inventory(client: GitHubClient, input_path: str, dry_run: bool) -> Non
         if not url:
             raise ValueError("Each inventory entry must include 'url'")
 
+        # Apply limit filter using inventory fields (no API call needed)
+        if limit is not None:
+            entry_state = str(entry.get("state") or "")
+            entry_fork = bool(entry.get("fork", False))
+            entry_private = bool(entry.get("private", False))
+            if limit == "forked" and not entry_fork:
+                skipped += 1
+                continue
+            if limit == "archived" and entry_state != "archived":
+                skipped += 1
+                continue
+            if limit == "active" and entry_state != "active":
+                skipped += 1
+                continue
+            if limit == "private" and not entry_private:
+                skipped += 1
+                continue
+
         target_state = validate_target_state(url, str(entry.get("target_state") or ""))
         owner, name = parse_owner_repo_from_url(url)
-        existing = client.get_repository(owner, name)
+        
+        # Try operation with retry on error
+        for attempt in range(2):
+            try:
+                existing = client.get_repository(owner, name)
 
-        if target_state == "absent":
-            if existing is None:
-                print(f"[SKIP] {owner}/{name}: already absent")
-                continue
-            print(f"[DELETE] {owner}/{name}")
-            if not dry_run:
-                client.delete_repository(owner, name)
-            continue
+                if target_state == "absent":
+                    if existing is None:
+                        print(f"{Fore.GREEN}[OK]{Style.RESET_ALL} {owner}/{name}: already absent")
+                        break
+                    print(f"{Fore.YELLOW}[DELETE]{Style.RESET_ALL} {owner}/{name}")
+                    if not dry_run:
+                        client.delete_repository(owner, name)
+                    break
 
-        desired_archived = target_state == "archived"
-        if existing is None:
-            if owner != authed_owner:
-                print(
-                    f"[SKIP] {owner}/{name}: missing and cannot be created under authenticated owner {authed_owner}"
-                )
-                continue
+                desired_archived = target_state == "archived"
+                if existing is None:
+                    if owner != authed_owner:
+                        print(
+                            f"{Fore.GREEN}[SKIP]{Style.RESET_ALL} {owner}/{name}: missing and cannot be created under authenticated owner {authed_owner}"
+                        )
+                        break
 
-            private = bool(entry.get("private", True))
-            description = str(entry.get("description") or "")
-            print(f"[CREATE] {owner}/{name} (private={private}, archived={desired_archived})")
-            if not dry_run:
-                client.create_repository(name=name, private=private, description=description)
-                if desired_archived:
-                    client.update_repository_state(owner, name, archived=True)
-            continue
+                    private = bool(entry.get("private", True))
+                    description = str(entry.get("description") or "")
+                    print(f"{Fore.YELLOW}[CREATE]{Style.RESET_ALL} {owner}/{name} (private={private}, archived={desired_archived})")
+                    if not dry_run:
+                        client.create_repository(name=name, private=private, description=description)
+                        if desired_archived:
+                            client.update_repository_state(owner, name, archived=True)
+                    break
 
-        current_archived = bool(existing.get("archived", False))
-        if current_archived == desired_archived:
-            print(f"[OK] {owner}/{name}: already in state '{target_state}'")
-            continue
+                current_archived = bool(existing.get("archived", False))
+                if current_archived == desired_archived:
+                    print(f"{Fore.GREEN}[OK]{Style.RESET_ALL} {owner}/{name}: already in state '{target_state}'")
+                    break
 
-        print(f"[UPDATE] {owner}/{name}: archived={desired_archived}")
-        if not dry_run:
-            client.update_repository_state(owner, name, archived=desired_archived)
+                print(f"{Fore.YELLOW}[UPDATE]{Style.RESET_ALL} {owner}/{name}: archived={desired_archived}")
+                if not dry_run:
+                    client.update_repository_state(owner, name, archived=desired_archived)
+                break
+                
+            except (GitHubApiError, OSError, ValueError) as exc:
+                if attempt == 0:
+                    print(f"{Fore.RED}[ERROR]{Style.RESET_ALL} {owner}/{name}: {exc}")
+                    print(f"{Fore.YELLOW}[RETRY]{Style.RESET_ALL} {owner}/{name}...")
+                else:
+                    print(f"{Fore.RED}[ERROR]{Style.RESET_ALL} {owner}/{name}: {exc} (retry failed, skipping)")
+
+    if skipped:
+        print(f"Skipped {skipped} repositories (filter: {limit})")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -245,6 +302,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     export_cmd = subparsers.add_parser("export", help="Export repositories to YAML")
     export_cmd.add_argument("--output", default="repositories.yaml", help="Output YAML path")
+    export_cmd.add_argument(
+        "--limit",
+        choices=sorted(SUPPORTED_LIMITS),
+        default=None,
+        metavar="FILTER",
+        help=f"Only include repositories matching filter: {', '.join(sorted(SUPPORTED_LIMITS))}",
+    )
 
     apply_cmd = subparsers.add_parser("apply", help="Apply target_state from YAML")
     apply_cmd.add_argument("--input", default="repositories.yaml", help="Input YAML path")
@@ -252,6 +316,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="Preview operations without changing GitHub",
+    )
+    apply_cmd.add_argument(
+        "--limit",
+        choices=sorted(SUPPORTED_LIMITS),
+        default=None,
+        metavar="FILTER",
+        help=f"Only process repositories matching filter: {', '.join(sorted(SUPPORTED_LIMITS))}",
     )
 
     return parser
@@ -273,9 +344,9 @@ def main() -> int:
         client = GitHubClient(token=token)
 
         if args.command == "export":
-            export_inventory(client=client, output_path=args.output)
+            export_inventory(client=client, output_path=args.output, limit=args.limit)
         elif args.command == "apply":
-            apply_inventory(client=client, input_path=args.input, dry_run=args.dry_run)
+            apply_inventory(client=client, input_path=args.input, dry_run=args.dry_run, limit=args.limit)
         else:
             parser.print_help()
             return 2

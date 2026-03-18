@@ -1,0 +1,2 @@
+[console_scripts]
+gh-repo-state = github_project_manager.cli:main

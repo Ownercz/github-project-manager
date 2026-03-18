@@ -1,3 +1,16 @@
+Metadata-Version: 2.4
+Name: github-project-manager
+Version: 0.1.0
+Summary: Manage GitHub repository archived/present/absent state from YAML inventory
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: requests>=2.32.0
+Requires-Dist: PyYAML>=6.0.1
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0.0; extra == "dev"
+Dynamic: license-file
+
 # GitHub Project Manager (LLM Project)
 
 > **LLM PROJECT NOTICE**
