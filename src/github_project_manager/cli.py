@@ -15,6 +15,7 @@ import yaml
 API_BASE = "https://api.github.com"
 SUPPORTED_TARGET_STATES = {"present", "archived", "absent"}
 REQUEST_TIMEOUT = 30
+DEFAULT_TOKEN_FILE = ".github-token"
 
 
 class GitHubApiError(RuntimeError):
@@ -134,6 +135,20 @@ def save_inventory(path: str | Path, payload: dict[str, Any]) -> None:
         yaml.safe_dump(payload, handle, sort_keys=False, allow_unicode=True)
 
 
+def resolve_github_token(explicit_token: str | None = None) -> str:
+    provided = str(explicit_token or "").strip()
+    if provided:
+        return provided
+
+    token_file = Path.cwd() / DEFAULT_TOKEN_FILE
+    if token_file.is_file():
+        file_token = token_file.read_text(encoding="utf-8").strip()
+        if file_token:
+            return file_token
+
+    return str(os.getenv("GITHUB_TOKEN", "")).strip()
+
+
 def export_inventory(client: GitHubClient, output_path: str) -> None:
     user = client.get_authenticated_user()
     repos = client.list_repositories()
@@ -222,8 +237,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--token",
-        default=os.getenv("GITHUB_TOKEN", ""),
-        help="GitHub token (default: env GITHUB_TOKEN)",
+        default="",
+        help="GitHub token (overrides .github-token and env GITHUB_TOKEN)",
     )
 
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -246,14 +261,17 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
 
-    token = str(args.token or "").strip()
-    if not token:
-        print("Missing GitHub token. Set GITHUB_TOKEN or pass --token.", file=sys.stderr)
-        return 2
-
-    client = GitHubClient(token=token)
-
     try:
+        token = resolve_github_token(args.token)
+        if not token:
+            print(
+                "Missing GitHub token. Use .github-token, set GITHUB_TOKEN, or pass --token.",
+                file=sys.stderr,
+            )
+            return 2
+
+        client = GitHubClient(token=token)
+
         if args.command == "export":
             export_inventory(client=client, output_path=args.output)
         elif args.command == "apply":

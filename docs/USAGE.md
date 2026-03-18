@@ -1,5 +1,17 @@
 # Usage Guide
 
+## Authentication
+
+By default, token resolution order is:
+
+1. `--token`
+2. `.github-token` in the current working directory
+3. `GITHUB_TOKEN` environment variable
+
+Example:
+
+- `echo "<your_token_here>" > .github-token`
+
 ## Command overview
 
 - Export inventory:

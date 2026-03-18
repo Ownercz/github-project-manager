@@ -30,7 +30,19 @@ pip install -e .
 
 ## Authentication
 
-Create a GitHub personal access token and export it:
+Create a GitHub personal access token and store it in `.github-token` (recommended):
+
+```bash
+echo "<your_token_here>" > .github-token
+```
+
+By default, the CLI reads token sources in this order:
+
+1. `--token`
+2. `.github-token` in the current working directory
+3. `GITHUB_TOKEN` environment variable
+
+If you prefer environment variables, export it:
 
 ```bash
 export GITHUB_TOKEN="<your_token_here>"

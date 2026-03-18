@@ -10,6 +10,7 @@ from github_project_manager.cli import (
     export_inventory,
     parse_owner_repo_from_url,
     repo_to_inventory_item,
+    resolve_github_token,
 )
 
 
@@ -209,3 +210,34 @@ def test_apply_inventory_dry_run_makes_no_changes(tmp_path: Path) -> None:
     assert client.created == []
     assert client.updated == []
     assert client.deleted == []
+
+
+def test_resolve_github_token_prefers_explicit_token(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "env-token")
+    (tmp_path / ".github-token").write_text("file-token\n", encoding="utf-8")
+
+    assert resolve_github_token("explicit-token") == "explicit-token"
+
+
+def test_resolve_github_token_uses_file_before_env(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "env-token")
+    (tmp_path / ".github-token").write_text("file-token\n", encoding="utf-8")
+
+    assert resolve_github_token("") == "file-token"
+
+
+def test_resolve_github_token_falls_back_to_env(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "env-token")
+
+    assert resolve_github_token("") == "env-token"
+
+
+def test_resolve_github_token_ignores_empty_file(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("GITHUB_TOKEN", "env-token")
+    (tmp_path / ".github-token").write_text("\n", encoding="utf-8")
+
+    assert resolve_github_token("") == "env-token"
